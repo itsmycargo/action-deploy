@@ -32,6 +32,16 @@ inputs:
   role-to-assume:
     description: AWS Role to assume for deployment
     required: true
+  cloud-instance-base-url:
+    required: true
+  client-id:
+    required: true
+  client-secret:
+    required: true
+  token:
+    required: true
+  overrides:
+    required: true
   url:
     description: Environment URL
 
@@ -72,14 +82,14 @@ runs:
         is-pull-request: ${{ github.event_name == 'pull_request' }}
         parse-all-commits: ${{ github.event_name == 'push' }}
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ inputs.token }}
 
     - name: start deployment
       uses: bobheadxi/deployments@v0.6.0
       id: deployment
       with:
         step: start
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ inputs.token }}
         auto_inactive: ${{ inputs.environment_type != "production" && inputs.environment_type != "staging" }}
         env: ${{ inputs.environment_type }}
         transient: ${{ inputs.environment_type != "production" && inputs.environment != "staging" }}
@@ -88,16 +98,16 @@ runs:
     - if: always() && steps.jira_keys.outputs.jira-keys != ''
       uses: HighwayThree/jira-upload-deployment-info@master
       with:
-        cloud-instance-base-url: '${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}'
-        client-id: '${{ secrets.JIRA_CLIENT_ID }}'
-        client-secret: '${{ secrets.JIRA_CLIENT_SECRET }}'
+        cloud-instance-base-url: ${{ inputs.cloud-instance-base-url }}
+        client-id: ${{ inputs.client-id }}
+        client-secret: ${{ inputs.client-secret }}
         deployment-sequence-number: '${{ github.run_id }}'
         update-sequence-number: '${{ github.run_id }}'
         issue-keys: "${{ steps.jira_keys.outputs.jira-keys }}"
         display-name: "${{ inputs.description }}"
         url: "${{ steps.meta.outputs.url }}"
         # description: ""
-        last-updated: '${{github.event.head_commit.timestamp}}'
+        last-updated: '${{ github.event.head_commit.timestamp }}'
         state: 'in_progress'
         pipeline-id: '${{ github.repository }} ${{ github.workflow }}'
         pipeline-display-name: '${{ github.workflow }} (#${{ github.run_number }})'
@@ -109,8 +119,8 @@ runs:
     - uses: actions/checkout@master
     - uses: aws-actions/configure-aws-credentials@v1
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: eu-central-1
         role-to-assume: ${{ inputs.role-to-assume }}
         role-duration-seconds: 1200
@@ -126,15 +136,7 @@ runs:
     - name: Create Overrides
       run: |
         (cat << EOF
-        replicaCount: 1
-        stage: review
-        image:
-          tag: ${{ needs.docker.outputs.tag }}
-        ingress:
-          host: ${{ steps.meta.outputs.url }}
-        serviceAccount:
-          annotations:
-            eks.amazonaws.com/role-arn: ${{ secrets.ROLE_TESTING }}
+        ${{ inputs.overrides }}
         EOF
         ) > overrides.yaml
     - run: |
@@ -144,6 +146,7 @@ runs:
           --namespace ${{ steps.meta.outputs.namespace }} \
           --create-namespace \
           --values overrides.yaml \
+          --set environment=${{ inputs.environment }} \
           ${{ steps.meta.outputs.namespace }} ./chart
 
     - name: update deployment status
@@ -151,7 +154,7 @@ runs:
       if: always()
       with:
         step: finish
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ inputs.token }}
         env_url: https://${{ steps.meta.outputs.url }}
         status: ${{ job.status }}
         deployment_id: ${{ steps.deployment.outputs.deployment_id }}
@@ -159,9 +162,9 @@ runs:
     - if: success() && steps.jira_keys.outputs.jira-keys != ''
       uses: HighwayThree/jira-upload-deployment-info@master
       with:
-        cloud-instance-base-url: '${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}'
-        client-id: '${{ secrets.JIRA_CLIENT_ID }}'
-        client-secret: '${{ secrets.JIRA_CLIENT_SECRET }}'
+        cloud-instance-base-url: '${{ inputs.cloud-instance-base-url }}'
+        client-id: '${{ inputs.client-id }}'
+        client-secret: '${{ inputs.client-secret }}'
         deployment-sequence-number: '${{ github.run_id }}'
         update-sequence-number: '${{ github.run_id }}'
         issue-keys: "${{ steps.jira_keys.outputs.jira-keys }}"
@@ -180,9 +183,9 @@ runs:
     - if: failure() && steps.jira_keys.outputs.jira-keys != ''
       uses: HighwayThree/jira-upload-deployment-info@master
       with:
-        cloud-instance-base-url: '${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}'
-        client-id: '${{ secrets.JIRA_CLIENT_ID }}'
-        client-secret: '${{ secrets.JIRA_CLIENT_SECRET }}'
+        cloud-instance-base-url: '${{ inputs.cloud-instance-base-url }}'
+        client-id: '${{ inputs.client-id }}'
+        client-secret: '${{ inputs.client-secret }}'
         deployment-sequence-number: '${{ github.run_id }}'
         update-sequence-number: '${{ github.run_id }}'
         issue-keys: "${{ steps.jira_keys.outputs.jira-keys }}"
