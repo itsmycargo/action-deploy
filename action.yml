@@ -1,0 +1,191 @@
+name: Deploy to Environment
+description: Deploy
+author: itsmycargo
+branding:
+  color: blue
+  icon: layers
+
+inputs:
+  environment:
+    description: Environment Name
+    required: true
+  environment_type:
+    description: Environment type (unmapped, development, testing, staging, production)
+    required: true
+  description:
+    description: Environment Description
+    required: true
+  kubeconfig:
+    description: "Kube Config for deployments"
+    required: true
+  aws-access-key-id:
+    description: AWS Access Key ID for login and pushing to ECR Repository
+    required: true
+  aws-secret-access-key:
+    description: AWS Access Key for login and pushing to ECR Repository
+    required: true
+  aws-region:
+    description: AWS Region for ECR Repository
+    required: true
+  url:
+    description: Environment URL
+
+outputs:
+  namespace:
+    description: Deployed Namespace
+    value: ${{ steps.meta.outputs.namespace }}
+  url:
+    description: URL of deployment
+    value: ${{ steps.meta.outputs.url }}
+  branch:
+    description: Deployed Branch name
+    value: ${{ steps.meta.outputs.branch }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: meta
+      run: |
+        BRANCH="$(echo ${GITHUB_HEAD_REF##*/} | tr -cd '[a-zA-Z0-9-]' | head -c63)"
+        NAMESPACE="siren-${BRANCH}"
+        URL="${{ inputs.url }}"
+        [ -z "${URL}" ] && URL="https://${NAMESPACE}.itsmycargo.dev"
+
+        echo "::set-output name=branch::${BRANCH}"
+        echo "::set-output name=namespace::${NAMESPACE}"
+        echo "::set-output name=url::${URL}"
+        echo "::set-output name=environment::${{ inputs.environment }}}"
+        echo "::set-output name=environment_type::${{ inputs.environment_type }}"
+
+    - id: jira_keys
+      if: always()
+      uses: HighwayThree/jira-extract-issue-keys@master
+      with:
+        is-pull-request: ${{ github.event_name == 'pull_request' }}
+        parse-all-commits: ${{ github.event_name == 'push' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: start deployment
+      uses: bobheadxi/deployments@v0.6.0
+      id: deployment
+      with:
+        step: start
+        token: ${{ secrets.GITHUB_TOKEN }}
+        auto_inactive: ${{ inputs.environment_type != "production" && inputs.environment_type != "staging" }}
+        env: ${{ inputs.environment_type }}
+        transient: ${{ inputs.environment_type != "production" && inputs.environment != "staging" }}
+        ref: ${{ github.head_ref }}
+
+    - if: always() && steps.jira_keys.outputs.jira-keys != ''
+      uses: HighwayThree/jira-upload-deployment-info@master
+      with:
+        cloud-instance-base-url: '${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}'
+        client-id: '${{ secrets.JIRA_CLIENT_ID }}'
+        client-secret: '${{ secrets.JIRA_CLIENT_SECRET }}'
+        deployment-sequence-number: '${{ github.run_id }}'
+        update-sequence-number: '${{ github.run_id }}'
+        issue-keys: "${{ steps.jira_keys.outputs.jira-keys }}"
+        display-name: "${{ inputs.description }}"
+        url: "${{ steps.meta.outputs.url }}"
+        # description: ""
+        last-updated: '${{github.event.head_commit.timestamp}}'
+        state: 'in_progress'
+        pipeline-id: '${{ github.repository }} ${{ github.workflow }}'
+        pipeline-display-name: '${{ github.workflow }} (#${{ github.run_number }})'
+        pipeline-url: '${{github.event.repository.url}}/actions/runs/${{github.run_id}}'
+        environment-id: '${{ input.environment }}'
+        environment-display-name: ${{ inputs.environment }}
+        environment-type: ${{ inputs.environment_type }}
+
+    - uses: actions/checkout@master
+    - uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: eu-central-1
+        role-to-assume: ${{ secrets.AWS_CLUSTER_ROLE }}
+        role-duration-seconds: 1200
+    - uses: Azure/k8s-set-context@v1
+      with:
+        kubeconfig: ${{ inputs.kubeconfig }}
+    - uses: azure/setup-kubectl@v1
+      with:
+        version: latest
+    - uses: azure/setup-helm@v1
+      with:
+        version: latest
+    - name: Create Overrides
+      run: |
+        (cat << EOF
+        replicaCount: 1
+        stage: review
+        image:
+          tag: ${{ needs.docker.outputs.tag }}
+        ingress:
+          host: ${{ steps.meta.outputs.url }}
+        serviceAccount:
+          annotations:
+            eks.amazonaws.com/role-arn: ${{ secrets.ROLE_TESTING }}
+        EOF
+        ) > overrides.yaml
+    - run: |
+        sed -i "s/^appVersion: \(.*\)/appVersion: \"pr-${{github.event.number}}.$(echo ${GITHUB_SHA} | head -c8)\"/" chart/Chart.yaml
+    - run: |
+        helm upgrade --install --timeout 5m --wait --wait-for-jobs \
+          --namespace ${{ steps.meta.outputs.namespace }} \
+          --create-namespace \
+          --values overrides.yaml \
+          ${{ steps.meta.outputs.namespace }} ./chart
+
+    - name: update deployment status
+      uses: bobheadxi/deployments@v0.6.0
+      if: always()
+      with:
+        step: finish
+        token: ${{ secrets.GITHUB_TOKEN }}
+        env_url: https://${{ steps.meta.outputs.url }}
+        status: ${{ job.status }}
+        deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+
+    - if: success() && steps.jira_keys.outputs.jira-keys != ''
+      uses: HighwayThree/jira-upload-deployment-info@master
+      with:
+        cloud-instance-base-url: '${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}'
+        client-id: '${{ secrets.JIRA_CLIENT_ID }}'
+        client-secret: '${{ secrets.JIRA_CLIENT_SECRET }}'
+        deployment-sequence-number: '${{ github.run_id }}'
+        update-sequence-number: '${{ github.run_id }}'
+        issue-keys: "${{ steps.jira_keys.outputs.jira-keys }}"
+        display-name: "${{ inputs.description }}"
+        url: "${{ steps.meta.outputs.url }}"
+        # description: ""
+        last-updated: '${{github.event.head_commit.timestamp}}'
+        state: 'successful'
+        pipeline-id: '${{ github.repository }} ${{ github.workflow }}'
+        pipeline-display-name: '${{ github.workflow }} (#${{ github.run_number }})'
+        pipeline-url: '${{github.event.repository.url}}/actions/runs/${{github.run_id}}'
+        environment-id: '${{ input.environment }}'
+        environment-display-name: ${{ input.environment }}
+        environment-type: '${{ input.environment_type }}'
+
+    - if: failure() && steps.jira_keys.outputs.jira-keys != ''
+      uses: HighwayThree/jira-upload-deployment-info@master
+      with:
+        cloud-instance-base-url: '${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}'
+        client-id: '${{ secrets.JIRA_CLIENT_ID }}'
+        client-secret: '${{ secrets.JIRA_CLIENT_SECRET }}'
+        deployment-sequence-number: '${{ github.run_id }}'
+        update-sequence-number: '${{ github.run_id }}'
+        issue-keys: "${{ steps.jira_keys.outputs.jira-keys }}"
+        display-name: "${{ inputs.description }}"
+        url: "${{ steps.meta.outputs.url }}"
+        # description: ""
+        last-updated: '${{github.event.head_commit.timestamp}}'
+        state: 'failed'
+        pipeline-id: '${{ github.repository }} ${{ github.workflow }}'
+        pipeline-display-name: '${{ github.workflow }} (#${{ github.run_number }})'
+        pipeline-url: '${{github.event.repository.url}}/actions/runs/${{github.run_id}}'
+        environment-id: '${{ input.environment }}'
+        environment-display-name: ${{ input.environment }}
+        environment-type: '${{ input.environment_type }}'
