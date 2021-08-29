@@ -9,9 +9,11 @@ inputs:
   environment:
     description: Environment Name
     required: true
+  branch:
+    description: Reference to be deployed
+    required: true
   environment_type:
     description: Environment type (unmapped, development, testing, staging, production)
-    required: true
   description:
     description: Environment Description
     required: true
@@ -26,6 +28,9 @@ inputs:
     required: true
   aws-region:
     description: AWS Region for ECR Repository
+    required: true
+  role-to-assume:
+    description: AWS Role to assume for deployment
     required: true
   url:
     description: Environment URL
@@ -46,16 +51,19 @@ runs:
   steps:
     - id: meta
       run: |
-        BRANCH="$(echo ${GITHUB_HEAD_REF##*/} | tr -cd '[a-zA-Z0-9-]' | head -c63)"
+        INPUT_BRANCH=${{ inputs.branch }}
+        BRANCH="$(echo ${INPUT_BRANCH##*/} | tr -cd '[a-zA-Z0-9-]' | head -c63)"
         NAMESPACE="siren-${BRANCH}"
         URL="${{ inputs.url }}"
         [ -z "${URL}" ] && URL="https://${NAMESPACE}.itsmycargo.dev"
+        ENVIRONMENT_TYPE="${{ inputs.environment_type }}"
+        [ -z ENVIRONMENT_TYPE ] && ENVIRONMENT_TYPE=$(echo ${{ inputs.environment }} | tr '[:upper:]' '[:lower:]')
 
         echo "::set-output name=branch::${BRANCH}"
         echo "::set-output name=namespace::${NAMESPACE}"
         echo "::set-output name=url::${URL}"
         echo "::set-output name=environment::${{ inputs.environment }}}"
-        echo "::set-output name=environment_type::${{ inputs.environment_type }}"
+        echo "::set-output name=environment_type::${ENVIRONMENT_TYPE}"
 
     - id: jira_keys
       if: always()
@@ -75,7 +83,7 @@ runs:
         auto_inactive: ${{ inputs.environment_type != "production" && inputs.environment_type != "staging" }}
         env: ${{ inputs.environment_type }}
         transient: ${{ inputs.environment_type != "production" && inputs.environment != "staging" }}
-        ref: ${{ github.head_ref }}
+        ref: ${{ inputs.ref }}
 
     - if: always() && steps.jira_keys.outputs.jira-keys != ''
       uses: HighwayThree/jira-upload-deployment-info@master
@@ -104,7 +112,7 @@ runs:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: eu-central-1
-        role-to-assume: ${{ secrets.AWS_CLUSTER_ROLE }}
+        role-to-assume: ${{ inputs.role-to-assume }}
         role-duration-seconds: 1200
     - uses: Azure/k8s-set-context@v1
       with:
